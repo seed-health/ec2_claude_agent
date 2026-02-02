@@ -2,9 +2,6 @@
 NOTES.txt
 *.pem
 
-# Local Claude instructions (user-specific)
-CLAUDE.local.md
-
 # Python
 __pycache__/
 *.pyc
