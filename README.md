@@ -194,11 +194,6 @@ tmux attach -t claude-bot
 tmux kill-session -t claude-bot
 ```
 
-Production (as restricted user):
-```bash
-sudo -u claude-bot -E python3 app.py
-```
-
 ## Slack App Setup
 
 1. Create app at [api.slack.com/apps](https://api.slack.com/apps)
