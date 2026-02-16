@@ -16,6 +16,7 @@ Slack → Cloudflare (HTTPS) → EC2 (Flask) → Claude CLI → Workspace
 | `SLACK_SIGNING_SECRET` | Yes | Signing secret from Slack App settings |
 | `ANTHROPIC_API_KEY` | Yes | API key from Anthropic (starts with `sk-ant-`) |
 | `WORKSPACE_DIR` | No | Path to workspace directory (default: `/home/claude-bot/workspace`) |
+| `WORKTREES_DIR` | No | Path to worktrees directory (default: `/home/claude-bot/worktrees`) |
 
 Set these when running the app:
 ```bash
@@ -219,26 +220,49 @@ tmux kill-session -t claude-bot
 Claude conversations are linked to Slack threads using a session tracking system:
 
 ```
-Slack Thread (thread_ts) → Claude Session ID + Git Branch
+Slack Thread (thread_ts) → Claude Session ID + Git Branch + Worktree Path
 ```
 
 **How it works:**
 
-1. **First message in a thread**: When you mention the bot, it starts a new Claude session. After Claude responds, the app stores:
+1. **First message in a thread**: When you mention the bot, it creates a dedicated [git worktree](https://git-scm.com/docs/git-worktree) for this thread and starts a new Claude session inside it. After Claude responds, the app stores:
    - The Claude `session_id` (for conversation memory)
    - The current git branch (for workspace continuity)
+   - The `worktree_path` (isolated working directory for this thread)
 
 2. **Follow-up messages in the same thread**: When you reply in the same Slack thread, the app:
    - Looks up the stored session using `thread_ts` as the key
-   - Checks out the git branch that was active during the last message
+   - Reuses the thread's existing worktree (no branch switching needed)
    - Resumes the Claude session with `--resume <session_id>`, preserving full conversation context
 
-3. **New threads = new sessions**: Starting a new thread (or mentioning the bot outside a thread) creates a fresh Claude session with no memory of previous conversations.
+3. **New threads = new sessions**: Starting a new thread (or mentioning the bot outside a thread) creates a fresh Claude session with its own worktree.
 
 **Practical implications:**
 - Keep related requests in the same thread for continuity (e.g., "create a branch" → "make changes" → "commit")
 - Start a new thread when you want a clean slate
+- Multiple threads can work on different branches simultaneously without interference
 - The bot tracks up to 5 concurrent conversations
+
+## Git Worktrees
+
+Each Slack thread gets its own isolated git worktree so that concurrent threads don't interfere with each other.
+
+**How it works:**
+
+- The main repository lives at `WORKSPACE_DIR` (default: `/home/claude-bot/workspace`). This is used only as the base for creating worktrees — Claude never runs directly in it.
+- Per-thread worktrees are created under `WORKTREES_DIR` (default: `/home/claude-bot/worktrees`), named by the Slack thread timestamp (e.g., `1708012345_123456`).
+- Worktrees share the same git object store as the main repo, so they are lightweight (only the checked-out files take extra disk space).
+- Worktrees are created with a detached HEAD from the target branch. Claude can freely create or switch branches within the worktree.
+
+**Cleanup:**
+
+- On startup, all worktrees from the previous run are removed (session state is in-memory and lost on restart).
+- A background timer runs every 6 hours and removes worktrees that are no longer associated with an active thread and are older than 24 hours.
+- Git's internal worktree tracking is pruned automatically via `git worktree prune`.
+
+**Concurrency safety:**
+
+- If two messages arrive in the same thread while Claude is still processing, the second message gets a "still working" reply instead of running concurrently in the same worktree.
 
 ## Security Notes
 

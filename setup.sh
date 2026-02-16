@@ -74,6 +74,15 @@ else
     mkdir -p "$WORKSPACE"
 fi
 
+# Setup worktrees directory for per-thread isolation
+WORKTREES="${WORKTREES_DIR:-/home/claude-bot/worktrees}"
+if [ -d "$WORKTREES" ]; then
+    echo "  Worktrees directory $WORKTREES already exists"
+else
+    echo "  Creating worktrees directory: $WORKTREES"
+    mkdir -p "$WORKTREES"
+fi
+
 # Ensure correct ownership (ignore errors if already owned)
 chown -R "$CLAUDE_USER":"$CLAUDE_USER" "/home/$CLAUDE_USER" 2>/dev/null || true
 echo "  Verified ownership of /home/$CLAUDE_USER"
@@ -87,6 +96,7 @@ echo "=== Setting Up Git Config for Claude User ==="
 sudo -u "$CLAUDE_USER" git config --global user.name "Claude Bot" 2>/dev/null || true
 sudo -u "$CLAUDE_USER" git config --global user.email "claude-bot@localhost" 2>/dev/null || true
 sudo -u "$CLAUDE_USER" git config --global --add safe.directory "$WORKSPACE" 2>/dev/null || true
+sudo -u "$CLAUDE_USER" git config --global --add safe.directory "$WORKTREES/*" 2>/dev/null || true
 echo "  Git configured for $CLAUDE_USER"
 
 # ============================================

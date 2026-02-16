@@ -21,32 +21,151 @@ claude_lock = threading.Lock()
 claude_process_count = 0
 MAX_CLAUDE_PROCESSES = 5
 
-# Track Claude session IDs and git branches per Slack thread
-# Key: thread_ts, Value: {"session_id": str, "branch": str}
+# Track Claude session IDs, git branches, and worktree paths per Slack thread
+# Key: thread_ts, Value: {"session_id": str, "branch": str, "worktree_path": str}
 thread_sessions = {}
 
-def get_current_branch():
-    """Get the current git branch in the workspace."""
+# Prevent concurrent Claude runs in the same thread (they'd share a worktree)
+active_threads = set()
+active_threads_lock = threading.Lock()
+
+def get_current_branch(cwd):
+    """Get the current git branch in the given directory."""
     result = subprocess.run(
         ["sudo", "-u", CLAUDE_USER, "git", "branch", "--show-current"],
-        capture_output=True, text=True, cwd=WORKSPACE_DIR
+        capture_output=True, text=True, cwd=cwd
     )
-    return result.stdout.strip() if result.returncode == 0 else "main"
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    return branch or DEFAULT_BRANCH
 
-def checkout_branch(branch):
-    """Checkout a git branch in the workspace."""
+def sanitize_thread_ts(thread_ts):
+    """Convert a Slack thread_ts into a filesystem-safe directory name."""
+    return thread_ts.replace(".", "_")
+
+def ensure_worktree(thread_ts, branch=None):
+    """Ensure a git worktree exists for the given Slack thread.
+
+    Returns the absolute path to the worktree directory.
+    Raises RuntimeError if worktree creation fails.
+    """
+    sanitized = sanitize_thread_ts(thread_ts)
+    worktree_path = os.path.join(WORKTREES_DIR, sanitized)
+
+    if os.path.isdir(worktree_path):
+        return worktree_path
+
+    branch = branch or DEFAULT_BRANCH
+
+    # Create worktree with --detach to avoid "branch already checked out" errors.
+    # Git doesn't allow the same branch in multiple worktrees, and main is
+    # already checked out in WORKSPACE_DIR. Detached HEAD is safe — Claude
+    # can create/switch branches within the worktree freely.
     result = subprocess.run(
-        ["sudo", "-u", CLAUDE_USER, "git", "checkout", branch],
+        ["sudo", "-u", CLAUDE_USER, "git", "worktree", "add",
+         "--detach", worktree_path, branch],
         capture_output=True, text=True, cwd=WORKSPACE_DIR
     )
+
     if result.returncode != 0:
-        print(f"Failed to checkout {branch}: {result.stderr}")
-    return result.returncode == 0
+        # Prune stale worktree metadata and retry
+        subprocess.run(
+            ["sudo", "-u", CLAUDE_USER, "git", "worktree", "prune"],
+            capture_output=True, text=True, cwd=WORKSPACE_DIR
+        )
+        result = subprocess.run(
+            ["sudo", "-u", CLAUDE_USER, "git", "worktree", "add",
+             "--detach", worktree_path, branch],
+            capture_output=True, text=True, cwd=WORKSPACE_DIR
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to create worktree for thread {thread_ts} "
+            f"on branch {branch}: {result.stderr}"
+        )
+
+    print(f"Created worktree at {worktree_path} (branch: {branch})")
+    return worktree_path
+
+def remove_worktree(thread_ts):
+    """Remove the worktree associated with a Slack thread."""
+    sanitized = sanitize_thread_ts(thread_ts)
+    worktree_path = os.path.join(WORKTREES_DIR, sanitized)
+
+    if not os.path.isdir(worktree_path):
+        return True
+
+    result = subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "worktree", "remove", "--force",
+         worktree_path],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+
+    if result.returncode != 0:
+        print(f"Failed to remove worktree {worktree_path}: {result.stderr}")
+        return False
+    return True
+
+def cleanup_stale_worktrees(max_age_hours=24):
+    """Remove worktrees not in thread_sessions and older than max_age_hours."""
+    if not os.path.isdir(WORKTREES_DIR):
+        return
+
+    cutoff = time.time() - (max_age_hours * 3600)
+
+    for entry in os.listdir(WORKTREES_DIR):
+        entry_path = os.path.join(WORKTREES_DIR, entry)
+        if not os.path.isdir(entry_path):
+            continue
+
+        # Reconstruct thread_ts from directory name
+        thread_ts = entry.replace("_", ".", 1)
+
+        if thread_ts in thread_sessions:
+            continue
+
+        try:
+            mtime = os.path.getmtime(entry_path)
+            if mtime > cutoff:
+                continue
+        except OSError:
+            continue
+
+        print(f"Cleaning up stale worktree: {entry_path}")
+        remove_worktree(thread_ts)
+
+    subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "worktree", "prune"],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+
+def cleanup_all_worktrees():
+    """Remove all worktrees. Called on startup since thread_sessions is in-memory."""
+    if not os.path.isdir(WORKTREES_DIR):
+        os.makedirs(WORKTREES_DIR, exist_ok=True)
+        return
+
+    for entry in os.listdir(WORKTREES_DIR):
+        entry_path = os.path.join(WORKTREES_DIR, entry)
+        if os.path.isdir(entry_path):
+            subprocess.run(
+                ["sudo", "-u", CLAUDE_USER, "git", "worktree", "remove",
+                 "--force", entry_path],
+                capture_output=True, text=True, cwd=WORKSPACE_DIR
+            )
+
+    subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "worktree", "prune"],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+    print("Cleaned up all worktrees from previous run")
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/claude-bot/workspace")
+WORKTREES_DIR = os.environ.get("WORKTREES_DIR", "/home/claude-bot/worktrees")
+DEFAULT_BRANCH = "main"
 CLAUDE_USER = "claude-bot"
 
 def verify_slack_request():
@@ -103,16 +222,41 @@ def add_reaction(channel, timestamp, emoji):
 def run_claude(task, channel, thread_ts, message_ts):
     global claude_process_count
 
+    # Prevent concurrent runs in the same thread (they'd share a worktree)
+    with active_threads_lock:
+        if thread_ts in active_threads:
+            post_to_slack(channel, thread_ts,
+                "I'm still working on the previous request in this thread. "
+                "Please wait for me to finish.")
+            with claude_lock:
+                claude_process_count -= 1
+            return
+        active_threads.add(thread_ts)
+
     add_reaction(channel, message_ts, "thumbsup")
 
     print(f"Running task: {task}")
     print(f"Current thread_sessions: {json.dumps(thread_sessions, indent=2)}")
 
-    # Checkout the branch for this thread (if any)
+    # Ensure a worktree exists for this thread
     thread_info = thread_sessions.get(thread_ts, {})
-    if thread_info.get("branch"):
-        print(f"Checking out branch {thread_info['branch']} for thread {thread_ts}")
-        checkout_branch(thread_info["branch"])
+    branch = thread_info.get("branch")
+
+    try:
+        worktree_path = thread_info.get("worktree_path")
+        if not worktree_path or not os.path.isdir(worktree_path):
+            worktree_path = ensure_worktree(thread_ts, branch)
+            print(f"Created/verified worktree at {worktree_path} for thread {thread_ts}")
+        else:
+            print(f"Reusing existing worktree at {worktree_path} for thread {thread_ts}")
+    except RuntimeError as e:
+        print(f"Worktree creation failed: {e}")
+        post_to_slack(channel, thread_ts, f"Failed to set up workspace: {e}")
+        with active_threads_lock:
+            active_threads.discard(thread_ts)
+        with claude_lock:
+            claude_process_count -= 1
+        return
 
     try:
         # Build environment for Claude subprocess
@@ -142,32 +286,36 @@ def run_claude(task, channel, thread_ts, message_ts):
             cmd,
             capture_output=True,
             text=True,
-            cwd=WORKSPACE_DIR,
+            cwd=worktree_path,
             stdin=subprocess.DEVNULL
         )
 
-        print(f"stdout: {result.stdout[:500]}")  # Add this
-        print(f"stderr: {result.stderr}")  # Add this
+        print(f"stdout: {result.stdout[:500]}")
+        print(f"stderr: {result.stderr}")
 
         try:
             output = json.loads(result.stdout)
             message = output.get("result", "Done, but no output.")
-            # Store session ID and current branch for conversation continuity
+            # Store session ID, branch, and worktree path for conversation continuity
             session_id = output.get("session_id")
-            current_branch = get_current_branch()
+            current_branch = get_current_branch(worktree_path)
             if session_id:
                 thread_sessions[thread_ts] = {
                     "session_id": session_id,
-                    "branch": current_branch
+                    "branch": current_branch,
+                    "worktree_path": worktree_path
                 }
-                print(f"Stored session {session_id}, branch {current_branch} for thread {thread_ts}")
+                print(f"Stored session {session_id}, branch {current_branch}, "
+                      f"worktree {worktree_path} for thread {thread_ts}")
         except Exception as e:
-            print(f"Parse error: {e}")  # Add this
+            print(f"Parse error: {e}")
             message = result.stdout or result.stderr or "Something went wrong."
 
-        print(f"Sending to Slack: {message[:200]}")  # Add this
+        print(f"Sending to Slack: {message[:200]}")
         post_to_slack(channel, thread_ts, message)
     finally:
+        with active_threads_lock:
+            active_threads.discard(thread_ts)
         with claude_lock:
             claude_process_count -= 1
 
@@ -239,5 +387,20 @@ def slack_events():
 
     return "ok"
 
+def start_cleanup_timer(interval_hours=6):
+    """Start a repeating background timer for worktree cleanup."""
+    def _cleanup():
+        while True:
+            time.sleep(interval_hours * 3600)
+            try:
+                cleanup_stale_worktrees(max_age_hours=24)
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+
+    t = threading.Thread(target=_cleanup, daemon=True)
+    t.start()
+
 if __name__ == "__main__":
+    cleanup_all_worktrees()
+    start_cleanup_timer()
     app.run(host="0.0.0.0", port=80)
