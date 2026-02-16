@@ -319,6 +319,125 @@ def run_claude(task, channel, thread_ts, message_ts):
         with claude_lock:
             claude_process_count -= 1
 
+def update_main_branch():
+    """Checkout and pull the main branch in the base workspace."""
+    checkout = subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "checkout", DEFAULT_BRANCH],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+    if checkout.returncode != 0:
+        return f"Failed to checkout `{DEFAULT_BRANCH}`: {checkout.stderr.strip()}"
+
+    pull = subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "pull"],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+    if pull.returncode != 0:
+        return f"Checked out `{DEFAULT_BRANCH}` but pull failed: {pull.stderr.strip()}"
+
+    return f"Updated `{DEFAULT_BRANCH}`:\n```\n{pull.stdout.strip()}\n```"
+
+def setup_branch(thread_ts, branch):
+    """Set up a thread's worktree on the given branch.
+
+    If the thread already has a worktree, removes it first.
+    If the branch doesn't exist, creates it from the default branch.
+    """
+    # Remove existing worktree for this thread if any
+    thread_info = thread_sessions.get(thread_ts, {})
+    if thread_info.get("worktree_path") and os.path.isdir(thread_info["worktree_path"]):
+        remove_worktree(thread_ts)
+
+    # Check if the branch exists
+    check = subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "rev-parse", "--verify", branch],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+    branch_exists = check.returncode == 0
+
+    if not branch_exists:
+        # Also check remote
+        check_remote = subprocess.run(
+            ["sudo", "-u", CLAUDE_USER, "git", "rev-parse", "--verify", f"origin/{branch}"],
+            capture_output=True, text=True, cwd=WORKSPACE_DIR
+        )
+        branch_exists = check_remote.returncode == 0
+
+    try:
+        worktree_path = ensure_worktree(thread_ts, branch if branch_exists else DEFAULT_BRANCH)
+    except RuntimeError as e:
+        return f"Failed to create worktree: {e}"
+
+    # If the branch didn't exist, create it inside the worktree
+    if not branch_exists:
+        create = subprocess.run(
+            ["sudo", "-u", CLAUDE_USER, "git", "checkout", "-b", branch],
+            capture_output=True, text=True, cwd=worktree_path
+        )
+        if create.returncode != 0:
+            return f"Worktree created but failed to create branch `{branch}`: {create.stderr.strip()}"
+
+    # Update thread_sessions
+    thread_sessions[thread_ts] = {
+        "session_id": thread_info.get("session_id", ""),
+        "branch": branch,
+        "worktree_path": worktree_path
+    }
+
+    if branch_exists:
+        return f"Worktree ready on existing branch `{branch}`"
+    else:
+        return f"Created new branch `{branch}` (from `{DEFAULT_BRANCH}`)"
+
+def format_status_message():
+    """Format current status as a Slack-friendly message."""
+    with claude_lock:
+        running = claude_process_count
+
+    with active_threads_lock:
+        active = list(active_threads)
+
+    lines = [f"*Claude Processes:* {running}/{MAX_CLAUDE_PROCESSES}"]
+
+    if not thread_sessions:
+        lines.append("No active threads.")
+    else:
+        lines.append(f"*Threads:* {len(thread_sessions)}")
+        for thread_ts, info in thread_sessions.items():
+            is_active = thread_ts in active_threads
+            status_icon = ":large_green_circle:" if is_active else ":white_circle:"
+            branch = info.get("branch", "unknown")
+            lines.append(f"  {status_icon} `{thread_ts}` — branch: `{branch}`")
+
+    return "\n".join(lines)
+
+@app.route("/status")
+def status():
+    """Return status of all active threads, worktrees, and Claude processes."""
+    with claude_lock:
+        running = claude_process_count
+
+    with active_threads_lock:
+        active = list(active_threads)
+
+    sessions = {}
+    for thread_ts, info in thread_sessions.items():
+        worktree_path = info.get("worktree_path", "")
+        sessions[thread_ts] = {
+            "session_id": info.get("session_id", ""),
+            "branch": info.get("branch", ""),
+            "worktree_path": worktree_path,
+            "worktree_exists": os.path.isdir(worktree_path) if worktree_path else False,
+            "active": thread_ts in active_threads,
+        }
+
+    return {
+        "claude_processes_running": running,
+        "max_claude_processes": MAX_CLAUDE_PROCESSES,
+        "active_threads": active,
+        "threads": sessions,
+    }
+
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     # Verify the request is from Slack
@@ -355,6 +474,19 @@ def slack_events():
         # Strip the @mention
         task = " ".join(text.split()[1:])
 
+        # Handle built-in commands before spawning Claude
+        cmd = task.strip().lower()
+        if cmd == "!status":
+            post_to_slack(channel, thread_ts, format_status_message())
+            return "ok"
+        if cmd == "!update":
+            post_to_slack(channel, thread_ts, update_main_branch())
+            return "ok"
+        if cmd.startswith("!branch "):
+            branch_name = task.strip().split(None, 1)[1]
+            post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
+            return "ok"
+
         # Run in background so we respond to Slack quickly
         threading.Thread(
             target=run_claude,
@@ -378,6 +510,19 @@ def slack_events():
 
         # No need to strip @mention in DMs
         task = text
+
+        # Handle built-in commands before spawning Claude
+        cmd = task.strip().lower()
+        if cmd == "!status":
+            post_to_slack(channel, thread_ts, format_status_message())
+            return "ok"
+        if cmd == "!update":
+            post_to_slack(channel, thread_ts, update_main_branch())
+            return "ok"
+        if cmd.startswith("!branch "):
+            branch_name = task.strip().split(None, 1)[1]
+            post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
+            return "ok"
 
         threading.Thread(
             target=run_claude,

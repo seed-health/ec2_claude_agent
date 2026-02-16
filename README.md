@@ -264,6 +264,28 @@ Each Slack thread gets its own isolated git worktree so that concurrent threads 
 
 - If two messages arrive in the same thread while Claude is still processing, the second message gets a "still working" reply instead of running concurrently in the same worktree.
 
+## Commands
+
+The bot supports `!` commands that are handled directly by the app (not sent to Claude). Use them in a channel with `@bot !command` or in a DM with just `!command`.
+
+| Command | Description |
+|---------|-------------|
+| `!status` | Show all active threads, their branches, and how many Claude processes are running |
+| `!update` | Pull the latest `main` branch in the base workspace. New threads will pick up the changes. |
+| `!branch <name>` | Set up the current thread's worktree on the given branch. If the branch exists, it checks it out. If it doesn't, it creates a new branch from `main`. Can be used at any point in a thread — replaces the existing worktree if one exists. |
+
+**Example flow:**
+```
+You:    @bot !branch feature/login
+Bot:    Worktree ready on existing branch `feature/login`
+You:    @bot fix the auth bug
+Bot:    [Claude works in the feature/login worktree]
+You:    @bot !status
+Bot:    Claude Processes: 0/5
+        Threads: 1
+          ⚪ `1708012345.123456` — branch: `feature/login`
+```
+
 ## Security Notes
 
 - The app verifies Slack request signatures
