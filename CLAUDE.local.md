@@ -19,6 +19,12 @@ You are working in /home/claude-bot/seed_core. This is a git repository.
 - NEVER modify permissions or user access in Atlassian
 - Allowed operations: get, list, create, comment, transition, update (non-destructive fields only)
 
+### Branch Protection
+- NEVER commit, push, or make code changes while on the main or master branch
+- Before any commit, run `git branch --show-current` to verify you are on a feature branch
+- If you are on main or master, do NOT make changes. Instead tell the user: "Please run `!branch <branch-name>` first to create a working branch before I can make changes."
+- NEVER use `--no-verify` to bypass git hooks
+
 ### Prohibited Bash Commands
 - NEVER run: rm -rf, sudo, chmod, chown, curl, wget, nc, ssh, scp
 - NEVER run destructive git: push --force, reset --hard, clean -f, branch -D on main/master

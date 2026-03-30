@@ -286,15 +286,16 @@ def run_claude(task, channel, thread_ts, message_ts):
     print(f"Current thread_sessions: {json.dumps(thread_sessions, indent=2)}")
 
     # Reuse existing worktree if the thread already has one, otherwise
-    # just run in the main workspace.  A worktree is only created when
-    # the user explicitly requests a branch via !branch.
+    # just run in the main workspace in read-only mode.  A worktree is
+    # only created when the user explicitly requests a branch via !branch.
     thread_info = thread_sessions.get(thread_ts, {})
     worktree_path = thread_info.get("worktree_path")
-    if worktree_path and os.path.isdir(worktree_path):
+    has_worktree = bool(worktree_path and os.path.isdir(worktree_path))
+    if has_worktree:
         print(f"Reusing existing worktree at {worktree_path} for thread {thread_ts}")
     else:
         worktree_path = WORKSPACE_DIR
-        print(f"Using main workspace {worktree_path} for thread {thread_ts}")
+        print(f"Using main workspace {worktree_path} (read-only, no worktree) for thread {thread_ts}")
 
     try:
         cmd = ["sudo"]
@@ -313,9 +314,12 @@ def run_claude(task, channel, thread_ts, message_ts):
         if thread_info.get("session_id"):
             cmd.extend(["--resume", thread_info["session_id"]])
 
+        # Full tools on a worktree branch; read-only on main workspace
+        allowed_tools = "Bash,Read,Write,Edit" if has_worktree else "Bash,Read"
+
         cmd.extend([
                 "-p", task,
-                "--allowedTools", "Bash,Read,Write,Edit",
+                "--allowedTools", allowed_tools,
                 "--output-format", "stream-json",
                 "--verbose",
                 "--dangerously-skip-permissions"
