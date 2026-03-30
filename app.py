@@ -225,12 +225,26 @@ def verify_slack_request():
     return hmac.compare_digest(computed_signature, slack_signature)
 
 def post_to_slack(channel, thread_ts, text):
-    requests.post(
+    resp = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
         json={
             "channel": channel,
             "thread_ts": thread_ts,
+            "text": text
+        }
+    )
+    data = resp.json()
+    return data.get("ts")  # message timestamp, used for chat.update
+
+def update_slack_message(channel, message_ts, text):
+    """Update an existing Slack message in-place."""
+    requests.post(
+        "https://slack.com/api/chat.update",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+        json={
+            "channel": channel,
+            "ts": message_ts,
             "text": text
         }
     )
@@ -249,6 +263,11 @@ def add_reaction(channel, timestamp, emoji):
 
 def run_claude(task, channel, thread_ts, message_ts):
     global claude_process_count
+
+    if not task or not task.strip():
+        with claude_lock:
+            claude_process_count -= 1
+        return
 
     # Prevent concurrent runs in the same thread (they'd share a worktree)
     with active_threads_lock:
@@ -287,11 +306,6 @@ def run_claude(task, channel, thread_ts, message_ts):
         return
 
     try:
-        # Build environment for Claude subprocess
-        claude_env = os.environ.copy()
-        if ANTHROPIC_API_KEY:
-            claude_env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
-
         cmd = ["sudo"]
         # Pass environment variables through sudo to claude-bot
         for var_name, var_value in [
@@ -311,42 +325,139 @@ def run_claude(task, channel, thread_ts, message_ts):
         cmd.extend([
                 "-p", task,
                 "--allowedTools", "Bash,Read,Write,Edit",
-                "--output-format", "json",
+                "--output-format", "stream-json",
+                "--verbose",
                 "--dangerously-skip-permissions"
         ])
 
-        result = subprocess.run(
+        # Post initial thinking message and get its ts for live updates
+        bot_msg_ts = post_to_slack(channel, thread_ts,
+                                   ":hourglass_flowing_sand: Thinking...")
+
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             cwd=worktree_path,
             stdin=subprocess.DEVNULL
         )
 
-        print(f"stdout: {result.stdout[:500]}")
-        print(f"stderr: {result.stderr}")
+        session_id = None
+        final_result = None
+        response_text = ""
+        tool_history = []       # list of tool names used so far
+        current_status = ""     # what's currently happening
+        last_update = 0
+        last_display = ""
+        UPDATE_INTERVAL = 20.0  # seconds between Slack updates (only sends if changed)
 
-        try:
-            output = json.loads(result.stdout)
-            message = output.get("result", "Done, but no output.")
-            # Store session ID, branch, and worktree path for conversation continuity
-            session_id = output.get("session_id")
+        def build_status_display():
+            """Build the current Slack message showing live progress."""
+            parts = []
+            # Show tool history as a compact trail
+            if tool_history:
+                trail = " → ".join(tool_history[-5:])  # last 5 tools
+                parts.append(f":hammer_and_wrench: {trail}")
+            if current_status:
+                parts.append(current_status)
+            if response_text:
+                # Show tail of response so far (Slack max is 40k chars)
+                preview = markdown_to_slack(response_text[-3000:])
+                if len(response_text) > 3000:
+                    preview = "…" + preview
+                parts.append(preview)
+            if not parts:
+                parts.append(":hourglass_flowing_sand: Thinking...")
+            return "\n\n".join(parts)
+
+        def maybe_update_slack(force=False):
+            """Send a Slack update if content changed and enough time has passed."""
+            nonlocal last_update, last_display
+            display = build_status_display()
+            if display == last_display:
+                return
+            now = time.time()
+            if force or (now - last_update >= UPDATE_INTERVAL):
+                update_slack_message(channel, bot_msg_ts, display)
+                last_display = display
+                last_update = now
+
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = event.get("type")
+
+            if event_type == "system":
+                session_id = event.get("session_id", session_id)
+
+            elif event_type == "assistant":
+                msg = event.get("message", {})
+                for block in msg.get("content", []):
+                    block_type = block.get("type")
+                    if block_type == "tool_use":
+                        tool_name = block.get("name", "tool")
+                        tool_input = block.get("input", {})
+                        tool_history.append(f"`{tool_name}`")
+                        # Show what file/command is being used
+                        detail = ""
+                        if tool_name == "Read":
+                            fp = tool_input.get("file_path", "")
+                            detail = f" `{fp.split('/')[-1]}`" if fp else ""
+                        elif tool_name == "Bash":
+                            cmd_str = tool_input.get("command", "")
+                            detail = f" `{cmd_str[:50]}`" if cmd_str else ""
+                        elif tool_name in ("Edit", "Write"):
+                            fp = tool_input.get("file_path", "")
+                            detail = f" `{fp.split('/')[-1]}`" if fp else ""
+                        current_status = f":gear: Running `{tool_name}`{detail}..."
+                        maybe_update_slack()
+
+                    elif block_type == "thinking":
+                        current_status = ":brain: Thinking..."
+                        maybe_update_slack()
+
+                    elif block_type == "text":
+                        text = block.get("text", "")
+                        if text:
+                            response_text = text  # full text from this block
+                            current_status = ""
+                            maybe_update_slack()
+
+            elif event_type == "result":
+                session_id = event.get("session_id", session_id)
+                final_result = event.get("result", "")
+
+        process.wait()
+        stderr_output = process.stderr.read() if process.stderr else ""
+
+        if process.returncode != 0 and not final_result:
+            print(f"Claude process failed (rc={process.returncode}): {stderr_output}")
+            message = final_result or response_text or stderr_output or "Something went wrong."
+        else:
+            message = final_result or response_text or "Done, but no output."
+
+        # Store session for conversation continuity
+        if session_id:
             current_branch = get_current_branch(worktree_path)
-            if session_id:
-                thread_sessions[thread_ts] = {
-                    "session_id": session_id,
-                    "branch": current_branch,
-                    "worktree_path": worktree_path
-                }
-                print(f"Stored session {session_id}, branch {current_branch}, "
-                      f"worktree {worktree_path} for thread {thread_ts}")
-        except Exception as e:
-            print(f"Parse error: {e}")
-            message = result.stdout or result.stderr or "Something went wrong."
+            thread_sessions[thread_ts] = {
+                "session_id": session_id,
+                "branch": current_branch,
+                "worktree_path": worktree_path
+            }
+            print(f"Stored session {session_id}, branch {current_branch}, "
+                  f"worktree {worktree_path} for thread {thread_ts}")
 
+        # Final update with complete response
         message = markdown_to_slack(message)
         print(f"Sending to Slack: {message[:200]}")
-        post_to_slack(channel, thread_ts, message)
+        update_slack_message(channel, bot_msg_ts, message)
     finally:
         with active_threads_lock:
             active_threads.discard(thread_ts)
@@ -526,8 +637,10 @@ def slack_events():
 
     event = data.get("event", {})
 
-    # Ignore bot messages (avoid loops)
+    # Ignore bot messages and message edits (avoid loops from chat.update)
     if event.get("bot_id"):
+        return "ok"
+    if event.get("subtype") in ("message_changed", "message_deleted", "bot_message"):
         return "ok"
 
     global claude_process_count
@@ -546,10 +659,16 @@ def slack_events():
             claude_process_count += 1
 
         # Strip the @mention
-        task = " ".join(text.split()[1:])
+        task = " ".join(text.split()[1:]).strip()
+
+        # Ignore empty mentions (just "@bot" with no text)
+        if not task:
+            with claude_lock:
+                claude_process_count -= 1
+            return "ok"
 
         # Handle built-in commands before spawning Claude
-        cmd = task.strip().lower()
+        cmd = task.lower()
         if cmd == "!status":
             with claude_lock:
                 claude_process_count -= 1
@@ -563,7 +682,7 @@ def slack_events():
         if cmd.startswith("!branch "):
             with claude_lock:
                 claude_process_count -= 1
-            branch_name = task.strip().split(None, 1)[1]
+            branch_name = task.split(None, 1)[1]
             post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
             return "ok"
         if cmd == "!cleanup-branches":
@@ -594,10 +713,16 @@ def slack_events():
             claude_process_count += 1
 
         # No need to strip @mention in DMs
-        task = text
+        task = text.strip()
+
+        # Ignore empty messages
+        if not task:
+            with claude_lock:
+                claude_process_count -= 1
+            return "ok"
 
         # Handle built-in commands before spawning Claude
-        cmd = task.strip().lower()
+        cmd = task.lower()
         if cmd == "!status":
             with claude_lock:
                 claude_process_count -= 1
@@ -611,7 +736,7 @@ def slack_events():
         if cmd.startswith("!branch "):
             with claude_lock:
                 claude_process_count -= 1
-            branch_name = task.strip().split(None, 1)[1]
+            branch_name = task.split(None, 1)[1]
             post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
             return "ok"
         if cmd == "!cleanup-branches":
