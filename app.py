@@ -7,8 +7,33 @@ import threading
 import hmac
 import hashlib
 import time
+import re
 
 app = Flask(__name__)
+
+
+def markdown_to_slack(text):
+    """Convert Markdown formatting to Slack mrkdwn."""
+    # Links: [text](url) -> <url|text>
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+
+    # Bold+italic: ***text*** or ___text___ -> *_text_*
+    text = re.sub(r'\*{3}(.+?)\*{3}', r'*_\1_*', text)
+    text = re.sub(r'_{3}(.+?)_{3}', r'*_\1_*', text)
+
+    # Bold: **text** -> *text*
+    text = re.sub(r'\*{2}(.+?)\*{2}', r'*\1*', text)
+
+    # Strikethrough: ~~text~~ -> ~text~
+    text = re.sub(r'~~(.+?)~~', r'~\1~', text)
+
+    # Headers: strip # prefix, make bold
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+
+    # Code blocks: remove language hints after ```
+    text = re.sub(r'```\w+\n', '```\n', text)
+
+    return text
 
 @app.before_request
 def require_https():
@@ -319,6 +344,7 @@ def run_claude(task, channel, thread_ts, message_ts):
             print(f"Parse error: {e}")
             message = result.stdout or result.stderr or "Something went wrong."
 
+        message = markdown_to_slack(message)
         print(f"Sending to Slack: {message[:200]}")
         post_to_slack(channel, thread_ts, message)
     finally:
@@ -396,6 +422,46 @@ def setup_branch(thread_ts, branch):
         return f"Worktree ready on existing branch `{branch}`"
     else:
         return f"Created new branch `{branch}` (from `{DEFAULT_BRANCH}`)"
+
+def cleanup_branches():
+    """Delete local branches that aren't the default and aren't tied to active sessions."""
+    # Get all local branches
+    result = subprocess.run(
+        ["sudo", "-u", CLAUDE_USER, "git", "branch", "--format=%(refname:short)"],
+        capture_output=True, text=True, cwd=WORKSPACE_DIR
+    )
+    if result.returncode != 0:
+        return f"Failed to list branches: {result.stderr.strip()}"
+
+    all_branches = [b.strip() for b in result.stdout.strip().splitlines() if b.strip()]
+
+    # Branches in use by active sessions
+    active_branches = {info.get("branch") for info in thread_sessions.values() if info.get("branch")}
+    active_branches.add(DEFAULT_BRANCH)
+
+    to_delete = [b for b in all_branches if b not in active_branches]
+
+    if not to_delete:
+        return "No stale branches to clean up."
+
+    deleted = []
+    failed = []
+    for branch in to_delete:
+        res = subprocess.run(
+            ["sudo", "-u", CLAUDE_USER, "git", "branch", "-D", branch],
+            capture_output=True, text=True, cwd=WORKSPACE_DIR
+        )
+        if res.returncode == 0:
+            deleted.append(branch)
+        else:
+            failed.append(f"`{branch}`: {res.stderr.strip()}")
+
+    lines = []
+    if deleted:
+        lines.append(f"Deleted {len(deleted)} branch(es): {', '.join(f'`{b}`' for b in deleted)}")
+    if failed:
+        lines.append(f"Failed to delete {len(failed)}:\n" + "\n".join(failed))
+    return "\n".join(lines)
 
 def format_status_message():
     """Format current status as a Slack-friendly message."""
@@ -485,14 +551,25 @@ def slack_events():
         # Handle built-in commands before spawning Claude
         cmd = task.strip().lower()
         if cmd == "!status":
+            with claude_lock:
+                claude_process_count -= 1
             post_to_slack(channel, thread_ts, format_status_message())
             return "ok"
         if cmd == "!update":
+            with claude_lock:
+                claude_process_count -= 1
             post_to_slack(channel, thread_ts, update_main_branch())
             return "ok"
         if cmd.startswith("!branch "):
+            with claude_lock:
+                claude_process_count -= 1
             branch_name = task.strip().split(None, 1)[1]
             post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
+            return "ok"
+        if cmd == "!cleanup-branches":
+            with claude_lock:
+                claude_process_count -= 1
+            post_to_slack(channel, thread_ts, cleanup_branches())
             return "ok"
 
         # Run in background so we respond to Slack quickly
@@ -522,14 +599,25 @@ def slack_events():
         # Handle built-in commands before spawning Claude
         cmd = task.strip().lower()
         if cmd == "!status":
+            with claude_lock:
+                claude_process_count -= 1
             post_to_slack(channel, thread_ts, format_status_message())
             return "ok"
         if cmd == "!update":
+            with claude_lock:
+                claude_process_count -= 1
             post_to_slack(channel, thread_ts, update_main_branch())
             return "ok"
         if cmd.startswith("!branch "):
+            with claude_lock:
+                claude_process_count -= 1
             branch_name = task.strip().split(None, 1)[1]
             post_to_slack(channel, thread_ts, setup_branch(thread_ts, branch_name))
+            return "ok"
+        if cmd == "!cleanup-branches":
+            with claude_lock:
+                claude_process_count -= 1
+            post_to_slack(channel, thread_ts, cleanup_branches())
             return "ok"
 
         threading.Thread(

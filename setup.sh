@@ -117,6 +117,23 @@ sudo -u "$CLAUDE_USER" git config --global --add safe.directory "$WORKTREES/*" 2
 echo "  Git configured for $CLAUDE_USER"
 
 # ============================================
+# Step 5a: Install CLAUDE.local.md for Claude User
+# ============================================
+echo ""
+echo "=== Installing CLAUDE.local.md for $CLAUDE_USER ==="
+
+CLAUDE_CONFIG_DIR="/home/$CLAUDE_USER/.claude"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+
+if [ -f "$SCRIPT_DIR/CLAUDE.local.md" ]; then
+    cp "$SCRIPT_DIR/CLAUDE.local.md" "$CLAUDE_CONFIG_DIR/CLAUDE.local.md"
+    chown -R "$CLAUDE_USER":"$CLAUDE_USER" "$CLAUDE_CONFIG_DIR"
+    echo "  Installed CLAUDE.local.md to $CLAUDE_CONFIG_DIR/"
+else
+    echo "  WARNING: CLAUDE.local.md not found in $SCRIPT_DIR, skipping"
+fi
+
+# ============================================
 # Step 5b: Set Environment Variables for Claude User
 # ============================================
 echo ""
