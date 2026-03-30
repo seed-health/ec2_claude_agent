@@ -163,6 +163,9 @@ def cleanup_all_worktrees():
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+GH_TOKEN = os.environ.get("GH_TOKEN")
+ATLASSIAN_API_TOKEN = os.environ.get("ATLASSIAN_API_TOKEN")
+ATLASSIAN_USER = os.environ.get("ATLASSIAN_USER")
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/claude-bot/workspace")
 WORKTREES_DIR = os.environ.get("WORKTREES_DIR", "/home/claude-bot/worktrees")
 DEFAULT_BRANCH = "main"
@@ -264,11 +267,16 @@ def run_claude(task, channel, thread_ts, message_ts):
         if ANTHROPIC_API_KEY:
             claude_env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
 
-        cmd = [
-                "sudo",
-            ]
-        if ANTHROPIC_API_KEY:
-            cmd.append(f"ANTHROPIC_API_KEY={ANTHROPIC_API_KEY}")
+        cmd = ["sudo"]
+        # Pass environment variables through sudo to claude-bot
+        for var_name, var_value in [
+            ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+            ("GH_TOKEN", GH_TOKEN),
+            ("ATLASSIAN_API_TOKEN", ATLASSIAN_API_TOKEN),
+            ("ATLASSIAN_USER", ATLASSIAN_USER),
+        ]:
+            if var_value:
+                cmd.append(f"{var_name}={var_value}")
         cmd.extend(["-u", CLAUDE_USER, "claude"])
 
         # Resume existing session if this thread has one (must come before -p)

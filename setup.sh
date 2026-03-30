@@ -50,7 +50,24 @@ echo "  ANTHROPIC_API_KEY: set"
 echo ""
 
 # ============================================
-# Step 2: Create Claude Bot User
+# Step 2: Install Python Dependencies
+# ============================================
+echo "=== Installing Python Dependencies ==="
+
+apt-get install -y python3 python3-pip -qq > /dev/null 2>&1
+echo "  python3 and pip3 installed"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    pip3 install --break-system-packages --ignore-installed -r "$SCRIPT_DIR/requirements.txt" -q
+    echo "  Python dependencies installed from requirements.txt"
+else
+    echo "  WARNING: requirements.txt not found in $SCRIPT_DIR"
+fi
+echo ""
+
+# ============================================
+# Step 3: Create Claude Bot User
 # ============================================
 echo "=== Creating Claude Bot User ==="
 
@@ -62,7 +79,7 @@ else
 fi
 
 # ============================================
-# Step 3: Setup Workspace
+# Step 4: Setup Workspace
 # ============================================
 echo ""
 echo "=== Setting Up Workspace ==="
@@ -88,7 +105,7 @@ chown -R "$CLAUDE_USER":"$CLAUDE_USER" "/home/$CLAUDE_USER" 2>/dev/null || true
 echo "  Verified ownership of /home/$CLAUDE_USER"
 
 # ============================================
-# Step 4: Git Configuration
+# Step 5: Git Configuration
 # ============================================
 echo ""
 echo "=== Setting Up Git Config for Claude User ==="
@@ -100,7 +117,33 @@ sudo -u "$CLAUDE_USER" git config --global --add safe.directory "$WORKTREES/*" 2
 echo "  Git configured for $CLAUDE_USER"
 
 # ============================================
-# Step 5: Check GitHub CLI Auth
+# Step 5b: Set Environment Variables for Claude User
+# ============================================
+echo ""
+echo "=== Setting Environment Variables for $CLAUDE_USER ==="
+
+BASHRC="/home/$CLAUDE_USER/.bashrc"
+
+# List of env vars to propagate to claude-bot
+ENV_VARS=(ANTHROPIC_API_KEY GH_TOKEN ATLASSIAN_API_TOKEN ATLASSIAN_USER)
+
+for VAR_NAME in "${ENV_VARS[@]}"; do
+    VAR_VALUE="${!VAR_NAME}"
+    if [ -n "$VAR_VALUE" ]; then
+        if grep -q "^export $VAR_NAME=" "$BASHRC" 2>/dev/null; then
+            sed -i "s|^export $VAR_NAME=.*|export $VAR_NAME='$VAR_VALUE'|" "$BASHRC"
+            echo "  Updated $VAR_NAME in $BASHRC"
+        else
+            echo "export $VAR_NAME='$VAR_VALUE'" >> "$BASHRC"
+            echo "  Added $VAR_NAME to $BASHRC"
+        fi
+    else
+        echo "  Skipping $VAR_NAME (not set)"
+    fi
+done
+
+# ============================================
+# Step 6: Check GitHub CLI Auth
 # ============================================
 echo ""
 echo "=== Checking GitHub CLI Authentication ==="
@@ -116,7 +159,7 @@ else
 fi
 
 # ============================================
-# Step 6: Check Atlassian CLI Auth
+# Step 7: Check Atlassian CLI Auth
 # ============================================
 echo ""
 echo "=== Checking Atlassian CLI Authentication ==="

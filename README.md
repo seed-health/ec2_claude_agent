@@ -47,8 +47,8 @@ sudo apt install -y vim
 # Install Python and pip
 sudo apt install -y python3 python3-pip
 
-# Install Flask
-pip3 install flask requests
+# Install Python dependencies
+sudo pip3 install --break-system-packages -r requirements.txt
 
 # Install Docker
 sudo apt install -y docker.io docker-compose
@@ -129,7 +129,7 @@ sudo -u claude-bot git clone git@github.com:your-org/your-repo.git .
 
 Run the setup script for better security:
 ```bash
-sudo bash setup.sh
+sudo -E bash setup.sh
 ```
 
 ### 7. Configure Claude
