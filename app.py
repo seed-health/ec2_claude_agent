@@ -285,25 +285,16 @@ def run_claude(task, channel, thread_ts, message_ts):
     print(f"Running task: {task}")
     print(f"Current thread_sessions: {json.dumps(thread_sessions, indent=2)}")
 
-    # Ensure a worktree exists for this thread
+    # Reuse existing worktree if the thread already has one, otherwise
+    # just run in the main workspace.  A worktree is only created when
+    # the user explicitly requests a branch via !branch.
     thread_info = thread_sessions.get(thread_ts, {})
-    branch = thread_info.get("branch")
-
-    try:
-        worktree_path = thread_info.get("worktree_path")
-        if not worktree_path or not os.path.isdir(worktree_path):
-            worktree_path = ensure_worktree(thread_ts, branch)
-            print(f"Created/verified worktree at {worktree_path} for thread {thread_ts}")
-        else:
-            print(f"Reusing existing worktree at {worktree_path} for thread {thread_ts}")
-    except RuntimeError as e:
-        print(f"Worktree creation failed: {e}")
-        post_to_slack(channel, thread_ts, f"Failed to set up workspace: {e}")
-        with active_threads_lock:
-            active_threads.discard(thread_ts)
-        with claude_lock:
-            claude_process_count -= 1
-        return
+    worktree_path = thread_info.get("worktree_path")
+    if worktree_path and os.path.isdir(worktree_path):
+        print(f"Reusing existing worktree at {worktree_path} for thread {thread_ts}")
+    else:
+        worktree_path = WORKSPACE_DIR
+        print(f"Using main workspace {worktree_path} for thread {thread_ts}")
 
     try:
         cmd = ["sudo"]
