@@ -90,29 +90,21 @@ Install the Go-based Atlassian CLI:
 
 ```bash
 # Download latest release (check https://github.com/atlassian/acli/releases for current version)
-curl -LO https://github.com/atlassian/acli/releases/latest/download/acli_linux_amd64.tar.gz
-tar -xzf acli_linux_amd64.tar.gz
-sudo mv acli /usr/local/bin/
-rm acli_linux_amd64.tar.gz
+#curl -LO https://github.com/atlassian/acli/releases/latest/download/acli_linux_amd64.tar.gz
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/omar16100/atlassian-cli/releases/download/v0.3.1/atlassian-cli-installer.sh | sh
+source $HOME/.cargo/env
+echo "alias acli='atlassian-cli'" >> ~/.bashrc
+source ~/.bashrc
 
 # Authenticate (interactive - will prompt for server, email, token)
 acli jira auth
+acli auth login --profile default --token $ATLASSIAN_API_TOKEN --email $ATLASSIAN_USER --base-url https://seed-dev.atlassian.net
 
 # You'll need an API token from: https://id.atlassian.com/manage-profile/security/api-tokens
 
 # Test connection
 acli jira project list
-```
-
-Common commands:
-```bash
-acli jira workitem get TICKET-123           # Get issue
-acli jira workitem list --project CORE      # List issues
-acli jira workitem create --project CORE --type Task --summary "Title"
-acli jira workitem comment TICKET-123 --body "Comment"
-acli jira board list                        # List boards
-acli jira sprint list --board 123           # List sprints
-```
+acli jira issue get PLT-200
 
 ### 5. Clone Your Workspace
 
